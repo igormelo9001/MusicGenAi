@@ -8,6 +8,17 @@ import tensorflow as tf
 from tensorflow.keras.models import Sequential
 from tensorflow.keras.layers import LSTM, Dense, Dropout
 from pydub import AudioSegment
+import subprocess
+
+# Verificação da Configuração do FFmpeg
+def check_ffmpeg():
+    try:
+        subprocess.run(['ffmpeg', '-version'], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        return True
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return False
+
+ffmpeg_installed = check_ffmpeg()
 
 # Funções de Pré-processamento
 def load_and_preprocess_audio(file_paths):
@@ -58,11 +69,14 @@ def save_audio(audio, sr, filename):
     
     sf.write(wav_path, audio, sr)
     
-    try:
-        sound = AudioSegment.from_wav(wav_path)
-        sound.export(mp3_path, format='mp3')
-    except FileNotFoundError:
-        print("FFmpeg não encontrado. Instale o FFmpeg e adicione ao PATH do sistema para salvar como MP3.")
+    if ffmpeg_installed:
+        try:
+            sound = AudioSegment.from_wav(wav_path)
+            sound.export(mp3_path, format='mp3')
+        except Exception as e:
+            print(f"Erro ao converter para MP3: {e}")
+    else:
+        print("FFmpeg não está instalado ou não está configurado corretamente. Instale o FFmpeg para salvar em MP3.")
 
 # Classe Tkinter para Interface Gráfica
 class MusicGenApp:
@@ -81,6 +95,12 @@ class MusicGenApp:
         
         self.generate_button = tk.Button(root, text="Gerar Música", command=self.generate_music)
         self.generate_button.pack(pady=5)
+        
+        self.duration_label = tk.Label(root, text="Duração da Música (segundos):")
+        self.duration_label.pack(pady=5)
+        
+        self.duration_entry = tk.Entry(root)
+        self.duration_entry.pack(pady=5)
         
         self.selected_files = []
         self.model = None
@@ -113,13 +133,22 @@ class MusicGenApp:
             self.label.config(text="Modelo não treinado!")
             return
         
+        try:
+            duration = int(self.duration_entry.get())
+        except ValueError:
+            self.label.config(text="Por favor, insira uma duração válida!")
+            return
+        
+        frames_per_second = 22050 // 512  # Número de frames por segundo (assumindo hop_length=512)
+        total_frames = duration * frames_per_second
+        
         self.label.config(text="Gerando música...")
         # Gere uma sequência inicial aleatória
         initial_seq = np.random.rand(1, 30, 40)
         
         generated_mfccs = []
         current_seq = initial_seq
-        for _ in range(100):  # Gera 100 frames de MFCCs
+        for _ in range(total_frames):  # Gera frames suficientes para a duração desejada
             next_frame = self.model.predict(current_seq)
             generated_mfccs.append(next_frame[0])
             current_seq = np.append(current_seq[:, 1:, :], next_frame.reshape(1, 1, 40), axis=1)
@@ -129,7 +158,7 @@ class MusicGenApp:
         audio = mfcc_to_audio(generated_mfccs, sr=self.sr)
         save_audio(audio, self.sr, "generated_music")
         
-        self.label.config(text="Música gerada com sucesso! Arquivos salvos em 'data/generated_music.wav' e 'data/generated_music.mp3'")
+        self.label.config(text=f"Música gerada com sucesso! Arquivos salvos em 'data/generated_music.wav' e 'data/generated_music.mp3'")
     
 def main():
     root = tk.Tk()
