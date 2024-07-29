@@ -45,7 +45,7 @@ def train_model(model, X_train, y_train, epochs=50, batch_size=32):
 # Função para gerar áudio a partir de MFCCs
 def mfcc_to_audio(mfccs, sr=22050):
     # Reconstrói o sinal de áudio a partir dos MFCCs
-    audio = librosa.feature.inverse.mfcc_to_audio(mfccs.T, sr=sr)
+    audio = librosa.feature.inverse.mfcc_to_audio(mfccs.T)
     return audio
 
 # Função para salvar o áudio em .wav e .mp3
@@ -57,8 +57,12 @@ def save_audio(audio, sr, filename):
     mp3_path = os.path.join('data', filename + '.mp3')
     
     sf.write(wav_path, audio, sr)
-    sound = AudioSegment.from_wav(wav_path)
-    sound.export(mp3_path, format='mp3')
+    
+    try:
+        sound = AudioSegment.from_wav(wav_path)
+        sound.export(mp3_path, format='mp3')
+    except FileNotFoundError:
+        print("FFmpeg não encontrado. Instale o FFmpeg e adicione ao PATH do sistema para salvar como MP3.")
 
 # Classe Tkinter para Interface Gráfica
 class MusicGenApp:
