@@ -25,8 +25,9 @@ def load_and_preprocess_audio(file_paths):
     data = []
     for file_path in file_paths:
         y, sr = librosa.load(file_path, sr=22050)  # Carrega o arquivo de áudio
-        mfccs = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=40)  # Extrai MFCCs
-        data.append(mfccs.T)  # Transpõe para que a sequência de tempo seja a primeira dimensão
+        S = librosa.feature.melspectrogram(y=y, sr=sr, n_mels=128)  # Extrai espectrograma mel
+        S_dB = librosa.power_to_db(S, ref=np.max)
+        data.append(S_dB.T)  # Transpõe para que a sequência de tempo seja a primeira dimensão
     return data
 
 def create_sequences(data, seq_length):
@@ -45,7 +46,7 @@ def build_model(input_shape):
     model.add(Dropout(0.3))
     model.add(LSTM(256))
     model.add(Dropout(0.3))
-    model.add(Dense(40, activation='linear'))  # Saída com 40 MFCCs
+    model.add(Dense(128, activation='linear'))  # Saída com 128 filtros mel
     model.compile(loss='mean_squared_error', optimizer='adam')
     return model
 
@@ -53,10 +54,9 @@ def train_model(model, X_train, y_train, epochs=100, batch_size=64):
     model.fit(X_train, y_train, epochs=epochs, batch_size=batch_size)
     return model
 
-# Função para gerar áudio a partir de MFCCs
-def mfcc_to_audio(mfccs, sr=22050):
-    # Converte MFCCs para o inverso do espectrograma de potência
-    S = librosa.feature.inverse.mfcc_to_mel(mfccs.T)
+# Função para gerar áudio a partir de espectrogramas mel
+def spectrogram_to_audio(S_dB, sr=22050):
+    S = librosa.db_to_power(S_dB.T)
     audio = librosa.feature.inverse.mel_to_audio(S, sr=sr)
     return audio
 
@@ -145,18 +145,18 @@ class MusicGenApp:
         
         self.label.config(text="Gerando música...")
         # Gere uma sequência inicial aleatória
-        initial_seq = np.random.rand(1, 30, 40)
+        initial_seq = np.random.rand(1, 30, 128)
         
-        generated_mfccs = []
+        generated_spectrograms = []
         current_seq = initial_seq
         for _ in range(total_frames):  # Gera frames suficientes para a duração desejada
             next_frame = self.model.predict(current_seq)
-            generated_mfccs.append(next_frame[0])
-            current_seq = np.append(current_seq[:, 1:, :], next_frame.reshape(1, 1, 40), axis=1)
+            generated_spectrograms.append(next_frame[0])
+            current_seq = np.append(current_seq[:, 1:, :], next_frame.reshape(1, 1, 128), axis=1)
         
-        generated_mfccs = np.array(generated_mfccs)
+        generated_spectrograms = np.array(generated_spectrograms)
         
-        audio = mfcc_to_audio(generated_mfccs, sr=self.sr)
+        audio = spectrogram_to_audio(generated_spectrograms, sr=self.sr)
         save_audio(audio, self.sr, "generated_music")
         
         self.label.config(text=f"Música gerada com sucesso! Arquivos salvos em 'data/generated_music.wav' e 'data/generated_music.mp3'")
