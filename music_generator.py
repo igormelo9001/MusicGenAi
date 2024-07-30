@@ -41,22 +41,23 @@ def create_sequences(data, seq_length):
 # Funções de Construção e Treinamento do Modelo
 def build_model(input_shape):
     model = Sequential()
-    model.add(LSTM(128, input_shape=input_shape, return_sequences=True))
-    model.add(Dropout(0.2))
-    model.add(LSTM(128))
-    model.add(Dropout(0.2))
+    model.add(LSTM(256, input_shape=input_shape, return_sequences=True))
+    model.add(Dropout(0.3))
+    model.add(LSTM(256))
+    model.add(Dropout(0.3))
     model.add(Dense(40, activation='linear'))  # Saída com 40 MFCCs
     model.compile(loss='mean_squared_error', optimizer='adam')
     return model
 
-def train_model(model, X_train, y_train, epochs=50, batch_size=32):
+def train_model(model, X_train, y_train, epochs=100, batch_size=64):
     model.fit(X_train, y_train, epochs=epochs, batch_size=batch_size)
     return model
 
 # Função para gerar áudio a partir de MFCCs
 def mfcc_to_audio(mfccs, sr=22050):
-    # Reconstrói o sinal de áudio a partir dos MFCCs
-    audio = librosa.feature.inverse.mfcc_to_audio(mfccs.T)
+    # Converte MFCCs para o inverso do espectrograma de potência
+    S = librosa.feature.inverse.mfcc_to_mel(mfccs.T)
+    audio = librosa.feature.inverse.mel_to_audio(S, sr=sr)
     return audio
 
 # Função para salvar o áudio em .wav e .mp3
