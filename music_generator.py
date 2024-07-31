@@ -6,7 +6,7 @@ import librosa
 import soundfile as sf
 import tensorflow as tf
 from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import LSTM, Dense, Dropout
+from tensorflow.keras.layers import LSTM, Dense, Dropout, BatchNormalization
 from pydub import AudioSegment
 import subprocess
 from scipy.signal import butter, lfilter
@@ -36,32 +36,38 @@ def create_sequences(data, seq_length):
     X = []
     y = []
     for song in data:
-        for i in range(len(song) - seq_length):
-            X.append(song[i:i + seq_length])
-            y.append(song[i + seq_length])
+        num_sequences = len(song) // seq_length
+        for i in range(num_sequences):
+            start = i * seq_length
+            end = start + seq_length
+            X.append(song[start:end])
+            if end + seq_length < len(song):
+                y.append(song[end:end + seq_length])
     return np.array(X), np.array(y)
+
+def get_bpm(file_path):
+    y, sr = librosa.load(file_path, sr=22050)
+    onset_env = librosa.onset.onset_strength(y=y, sr=sr)
+    tempo, _ = librosa.beat.beat_track(onset_envelope=onset_env, sr=sr)
+    return tempo
 
 # Funções de Construção e Treinamento do Modelo
 def build_model(input_shape):
     model = Sequential()
-    model.add(LSTM(256, input_shape=input_shape, return_sequences=True))
-    model.add(Dropout(0.2))
-    model.add(LSTM(256, return_sequences=True))
-    model.add(Dropout(0.2))
-    model.add(LSTM(256))
-    model.add(Dropout(0.2))
-    model.add(Dense(128, activation='linear'))
-    model.compile(loss=custom_loss, optimizer='adam')
+    model.add(LSTM(512, input_shape=input_shape, return_sequences=True))
+    model.add(Dropout(0.3))
+    model.add(BatchNormalization())
+    model.add(LSTM(512, return_sequences=True))
+    model.add(Dropout(0.3))
+    model.add(BatchNormalization())
+    model.add(LSTM(512))
+    model.add(Dropout(0.3))
+    model.add(Dense(input_shape[1], activation='tanh'))  # Usar ativação 'tanh' para saída normalizada
+    model.compile(loss='mean_squared_error', optimizer='adam')
     return model
 
-def custom_loss(y_true, y_pred):
-    mse = tf.reduce_mean(tf.square(y_true - y_pred))
-    # Adiciona um termo de regularização L2
-    l2_regularization = 0.01 * tf.reduce_sum(tf.square(y_pred))
-    return mse + l2_regularization
-
-def train_model(model, X_train, y_train, epochs=50, batch_size=32):
-    model.fit(X_train, y_train, epochs=epochs, batch_size=batch_size)
+def train_model(model, X_train, y_train, epochs=50, batch_size=64):
+    model.fit(X_train, y_train, epochs=epochs, batch_size=batch_size, validation_split=0.2)
     return model
 
 # Função para aplicar filtro passa-baixa
@@ -147,13 +153,20 @@ class MusicGenApp:
         self.duration_entry = tk.Entry(root)
         self.duration_entry.pack(pady=5)
         
+        self.bpm_label = tk.Label(root, text="BPM das Músicas:")
+        self.bpm_label.pack(pady=5)
+        
         self.selected_files = []
         self.model = None
         self.sr = 22050  # Taxa de amostragem padrão para áudio
+        self.bpm = None
         
     def select_files(self):
         files = filedialog.askopenfilenames(title="Selecione Músicas", filetypes=[("Arquivos de Áudio", "*.mp3 *.wav")])
         self.selected_files = self.root.tk.splitlist(files)
+        self.bpm = [get_bpm(file) for file in self.selected_files]
+        bpm_info = ", ".join(f"{b:.2f}" for b in self.bpm)
+        self.bpm_label.config(text=f"BPM das Músicas: {bpm_info}")
         self.label.config(text=f"Arquivos Selecionados: {len(self.selected_files)}")
         
     def train_model(self):
@@ -163,7 +176,7 @@ class MusicGenApp:
         
         self.label.config(text="Carregando e processando dados...")
         data = load_and_preprocess_audio(self.selected_files)
-        seq_length = 30  # Comprimento da sequência de entrada
+        seq_length = 60  # Comprimento da sequência de entrada (aumentado para captar mais contexto)
         X, y = create_sequences(data, seq_length)
         
         self.label.config(text="Construindo e treinando modelo...")
@@ -188,7 +201,7 @@ class MusicGenApp:
         total_frames = duration * frames_per_second
         
         self.label.config(text="Gerando música...")
-        initial_seq = np.random.rand(1, 30, 128)
+        initial_seq = np.random.rand(1, 60, 128)
         
         generated_spectrograms = []
         current_seq = initial_seq
@@ -219,8 +232,8 @@ class MusicGenApp:
         frames_per_second = 22050 // 512
         total_frames = duration * frames_per_second
         
-        self.label.config(text="Gerando música...")
-        initial_seq = np.random.rand(1, 30, 128)
+        self.label.config(text="Gerando MIDI...")
+        initial_seq = np.random.rand(1, 60, 128)
         
         generated_spectrograms = []
         current_seq = initial_seq
@@ -232,9 +245,10 @@ class MusicGenApp:
         generated_spectrogram = np.vstack(generated_spectrograms)
         
         self.label.config(text="Convertendo espectrograma para MIDI...")
-        save_midi(generated_spectrogram, sr=self.sr, filename="musica_gerada")
+        save_midi(generated_spectrogram, self.sr, "musica_gerada_midi")
         self.label.config(text="MIDI gerado e salvo com sucesso!")
 
+# Criação da Aplicação
 root = tk.Tk()
 app = MusicGenApp(root)
 root.mainloop()
