@@ -9,6 +9,8 @@ from tensorflow.keras.models import Sequential
 from tensorflow.keras.layers import LSTM, Dense, Dropout
 from pydub import AudioSegment
 import subprocess
+from scipy.signal import butter, lfilter
+from midiutil import MIDIFile
 
 # Verificação da Configuração do FFmpeg
 def check_ffmpeg():
@@ -24,9 +26,10 @@ ffmpeg_installed = check_ffmpeg()
 def load_and_preprocess_audio(file_paths):
     data = []
     for file_path in file_paths:
-        y, sr = librosa.load(file_path, sr=22050)  # Carrega o arquivo de áudio
-        mfccs = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=40)  # Extrai MFCCs
-        data.append(mfccs.T)  # Transpõe para que a sequência de tempo seja a primeira dimensão
+        y, sr = librosa.load(file_path, sr=22050)
+        S = librosa.feature.melspectrogram(y=y, sr=sr, n_mels=128)
+        S_dB = librosa.power_to_db(S, ref=np.max)
+        data.append(S_dB.T)
     return data
 
 def create_sequences(data, seq_length):
@@ -41,22 +44,42 @@ def create_sequences(data, seq_length):
 # Funções de Construção e Treinamento do Modelo
 def build_model(input_shape):
     model = Sequential()
-    model.add(LSTM(128, input_shape=input_shape, return_sequences=True))
+    model.add(LSTM(256, input_shape=input_shape, return_sequences=True))
     model.add(Dropout(0.2))
-    model.add(LSTM(128))
+    model.add(LSTM(256, return_sequences=True))
     model.add(Dropout(0.2))
-    model.add(Dense(40, activation='linear'))  # Saída com 40 MFCCs
-    model.compile(loss='mean_squared_error', optimizer='adam')
+    model.add(LSTM(256))
+    model.add(Dropout(0.2))
+    model.add(Dense(128, activation='linear'))
+    model.compile(loss=custom_loss, optimizer='adam')
     return model
+
+def custom_loss(y_true, y_pred):
+    mse = tf.reduce_mean(tf.square(y_true - y_pred))
+    # Adiciona um termo de regularização L2
+    l2_regularization = 0.01 * tf.reduce_sum(tf.square(y_pred))
+    return mse + l2_regularization
 
 def train_model(model, X_train, y_train, epochs=50, batch_size=32):
     model.fit(X_train, y_train, epochs=epochs, batch_size=batch_size)
     return model
 
-# Função para gerar áudio a partir de MFCCs
-def mfcc_to_audio(mfccs, sr=22050):
-    # Reconstrói o sinal de áudio a partir dos MFCCs
-    audio = librosa.feature.inverse.mfcc_to_audio(mfccs.T)
+# Função para aplicar filtro passa-baixa
+def butter_lowpass(cutoff, fs, order=5):
+    nyq = 0.5 * fs
+    normal_cutoff = cutoff / nyq
+    b, a = butter(order, normal_cutoff, btype='low', analog=False)
+    return b, a
+
+def lowpass_filter(data, cutoff, fs, order=5):
+    b, a = butter_lowpass(cutoff, fs, order=order)
+    y = lfilter(b, a, data)
+    return y
+
+# Função para gerar áudio a partir de espectrogramas mel
+def spectrogram_to_audio(S_dB, sr=22050):
+    S = librosa.db_to_power(S_dB.T)
+    audio = librosa.feature.inverse.mel_to_audio(S, sr=sr, n_iter=512)
     return audio
 
 # Função para salvar o áudio em .wav e .mp3
@@ -64,10 +87,12 @@ def save_audio(audio, sr, filename):
     if not os.path.exists('data'):
         os.makedirs('data')
     
+    filtered_audio = lowpass_filter(audio, cutoff=8000, fs=sr, order=6)
+    
     wav_path = os.path.join('data', filename + '.wav')
     mp3_path = os.path.join('data', filename + '.mp3')
     
-    sf.write(wav_path, audio, sr)
+    sf.write(wav_path, filtered_audio, sr)
     
     if ffmpeg_installed:
         try:
@@ -77,6 +102,23 @@ def save_audio(audio, sr, filename):
             print(f"Erro ao converter para MP3: {e}")
     else:
         print("FFmpeg não está instalado ou não está configurado corretamente. Instale o FFmpeg para salvar em MP3.")
+
+# Função para salvar o espectrograma como arquivo MIDI
+def save_midi(spectrogram, sr, filename):
+    if not os.path.exists('data'):
+        os.makedirs('data')
+    
+    midi = MIDIFile(1)
+    midi.addTempo(0, 0, 120)  # Adiciona tempo ao MIDI (exemplo: 120 BPM)
+    
+    for i, frame in enumerate(spectrogram):
+        for j, amplitude in enumerate(frame):
+            if amplitude > -20:  # Threshold para adicionar notas (ajustável)
+                midi.addNote(0, 0, j, i / sr * 512, 0.5, int(amplitude))
+    
+    midi_path = os.path.join('data', filename + '.mid')
+    with open(midi_path, "wb") as output_file:
+        midi.writeFile(output_file)
 
 # Classe Tkinter para Interface Gráfica
 class MusicGenApp:
@@ -95,6 +137,9 @@ class MusicGenApp:
         
         self.generate_button = tk.Button(root, text="Gerar Música", command=self.generate_music)
         self.generate_button.pack(pady=5)
+        
+        self.generate_midi_button = tk.Button(root, text="Gerar MIDI", command=self.generate_midi)
+        self.generate_midi_button.pack(pady=5)
         
         self.duration_label = tk.Label(root, text="Duração da Música (segundos):")
         self.duration_label.pack(pady=5)
@@ -139,31 +184,57 @@ class MusicGenApp:
             self.label.config(text="Por favor, insira uma duração válida!")
             return
         
-        frames_per_second = 22050 // 512  # Número de frames por segundo (assumindo hop_length=512)
+        frames_per_second = 22050 // 512
         total_frames = duration * frames_per_second
         
         self.label.config(text="Gerando música...")
-        # Gere uma sequência inicial aleatória
-        initial_seq = np.random.rand(1, 30, 40)
+        initial_seq = np.random.rand(1, 30, 128)
         
-        generated_mfccs = []
+        generated_spectrograms = []
         current_seq = initial_seq
-        for _ in range(total_frames):  # Gera frames suficientes para a duração desejada
+        for _ in range(total_frames):
             next_frame = self.model.predict(current_seq)
-            generated_mfccs.append(next_frame[0])
-            current_seq = np.append(current_seq[:, 1:, :], next_frame.reshape(1, 1, 40), axis=1)
+            generated_spectrograms.append(next_frame[0])
+            current_seq = np.concatenate((current_seq[:, 1:, :], next_frame[:, np.newaxis, :]), axis=1)
         
-        generated_mfccs = np.array(generated_mfccs)
+        generated_spectrogram = np.vstack(generated_spectrograms)
         
-        audio = mfcc_to_audio(generated_mfccs, sr=self.sr)
-        save_audio(audio, self.sr, "generated_music")
+        self.label.config(text="Convertendo espectrograma para áudio...")
+        generated_audio = spectrogram_to_audio(generated_spectrogram, sr=self.sr)
         
-        self.label.config(text=f"Música gerada com sucesso! Arquivos salvos em 'data/generated_music.wav' e 'data/generated_music.mp3'")
-    
-def main():
-    root = tk.Tk()
-    app = MusicGenApp(root)
-    root.mainloop()
+        save_audio(generated_audio, self.sr, "musica_gerada")
+        self.label.config(text="Música gerada e salva com sucesso!")
 
-if __name__ == "__main__":
-    main()
+    def generate_midi(self):
+        if self.model is None:
+            self.label.config(text="Modelo não treinado!")
+            return
+        
+        try:
+            duration = int(self.duration_entry.get())
+        except ValueError:
+            self.label.config(text="Por favor, insira uma duração válida!")
+            return
+        
+        frames_per_second = 22050 // 512
+        total_frames = duration * frames_per_second
+        
+        self.label.config(text="Gerando música...")
+        initial_seq = np.random.rand(1, 30, 128)
+        
+        generated_spectrograms = []
+        current_seq = initial_seq
+        for _ in range(total_frames):
+            next_frame = self.model.predict(current_seq)
+            generated_spectrograms.append(next_frame[0])
+            current_seq = np.concatenate((current_seq[:, 1:, :], next_frame[:, np.newaxis, :]), axis=1)
+        
+        generated_spectrogram = np.vstack(generated_spectrograms)
+        
+        self.label.config(text="Convertendo espectrograma para MIDI...")
+        save_midi(generated_spectrogram, sr=self.sr, filename="musica_gerada")
+        self.label.config(text="MIDI gerado e salvo com sucesso!")
+
+root = tk.Tk()
+app = MusicGenApp(root)
+root.mainloop()
