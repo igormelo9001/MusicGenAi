@@ -74,6 +74,7 @@ def build_gan(input_shape):
 def train_gan(generator, discriminator, gan, X, epochs=1, batch_size=32):
     for epoch in range(epochs):
         # Treinar Discriminador
+        discriminator.trainable = True
         idx = np.random.randint(0, X.shape[0], batch_size)
         real_sequences = X[idx]
         fake_sequences = generator.predict(np.random.randn(batch_size, 100))
@@ -83,9 +84,11 @@ def train_gan(generator, discriminator, gan, X, epochs=1, batch_size=32):
         d_loss = 0.5 * np.add(d_loss_real, d_loss_fake)
         
         # Treinar Gerador
+        discriminator.trainable = False
         g_loss = gan.train_on_batch(np.random.randn(batch_size, 100), np.ones((batch_size, 1)))
         
         print(f"{epoch}/{epochs} [D loss: {d_loss[0]} | D accuracy: {100*d_loss[1]}] [G loss: {g_loss}]")
+
 
 def generate_music(generator, duration, seq_length):
     noise = np.random.randn(duration * seq_length, 100)
