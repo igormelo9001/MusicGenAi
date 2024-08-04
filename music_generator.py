@@ -6,7 +6,7 @@ import librosa
 import soundfile as sf
 import tensorflow as tf
 from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import LSTM, Dense, Dropout
+from tensorflow.keras.layers import Input, LSTM, Dense, Dropout
 from pydub import AudioSegment
 import subprocess
 from scipy.signal import butter, lfilter
@@ -29,7 +29,19 @@ def load_and_preprocess_audio(file_paths):
         y, sr = librosa.load(file_path, sr=22050)
         S = librosa.feature.melspectrogram(y=y, sr=sr, n_mels=128)
         S_dB = librosa.power_to_db(S, ref=np.max)
-        data.append(S_dB.T)
+        harmonic, percussive = librosa.effects.hpss(y)
+        melody = librosa.feature.rms(y=harmonic)
+        
+        # Ajustar a dimensão para que possam ser concatenados
+        min_length = min(S_dB.shape[1], harmonic.shape[0], percussive.shape[0], melody.shape[1])
+        
+        S_dB = S_dB[:, :min_length]
+        harmonic = harmonic[:min_length]
+        percussive = percussive[:min_length]
+        melody = melody[:, :min_length]
+        
+        combined_data = np.vstack((S_dB, harmonic[np.newaxis, :], percussive[np.newaxis, :], melody))
+        data.append(combined_data.T)
     return data
 
 def create_sequences(data, seq_length):
@@ -39,24 +51,30 @@ def create_sequences(data, seq_length):
         for i in range(len(song) - seq_length):
             X.append(song[i:i + seq_length])
             y.append(song[i + seq_length])
-    return np.array(X), np.array(y)
+    X = np.array(X)
+    y = np.array(y)
 
-# Funções de Construção e Treinamento do Modelo
-def build_model(input_shape):
+    # Verifica se y tem a dimensão correta
+    if y.ndim == 1:
+        y = np.expand_dims(y, axis=-1)
+
+    return X, y
+
+def build_model(input_shape, output_shape):
     model = Sequential()
-    model.add(LSTM(256, input_shape=input_shape, return_sequences=True))
+    model.add(Input(shape=input_shape))
+    model.add(LSTM(256, return_sequences=True))
     model.add(Dropout(0.2))
     model.add(LSTM(256, return_sequences=True))
     model.add(Dropout(0.2))
     model.add(LSTM(256))
     model.add(Dropout(0.2))
-    model.add(Dense(128, activation='linear'))
+    model.add(Dense(output_shape, activation='linear'))
     model.compile(loss=custom_loss, optimizer='adam')
     return model
 
 def custom_loss(y_true, y_pred):
     mse = tf.reduce_mean(tf.square(y_true - y_pred))
-    # Adiciona um termo de regularização L2
     l2_regularization = 0.01 * tf.reduce_sum(tf.square(y_pred))
     return mse + l2_regularization
 
@@ -132,7 +150,7 @@ class MusicGenApp:
         self.select_button = tk.Button(root, text="Selecionar Músicas", command=self.select_files)
         self.select_button.pack(pady=5)
         
-        self.train_button = tk.Button(root, text="Treinar Modelo", command=self.train_model)
+        self.train_button = tk.Button(root, text="Treinar Modelo", command=self.train_model, state=tk.DISABLED)
         self.train_button.pack(pady=5)
         
         self.generate_button = tk.Button(root, text="Gerar Música", command=self.generate_music)
@@ -151,11 +169,24 @@ class MusicGenApp:
         self.model = None
         self.sr = 22050  # Taxa de amostragem padrão para áudio
         
+        self.music_listbox = tk.Listbox(root, height=10, width=50)
+        self.music_listbox.pack(pady=10)
+        
+        self.input_shape_dim = None
+    
     def select_files(self):
         files = filedialog.askopenfilenames(title="Selecione Músicas", filetypes=[("Arquivos de Áudio", "*.mp3 *.wav")])
         self.selected_files = self.root.tk.splitlist(files)
+        self.music_listbox.delete(0, tk.END)
+        for file in self.selected_files:
+            self.music_listbox.insert(tk.END, file)
         self.label.config(text=f"Arquivos Selecionados: {len(self.selected_files)}")
         
+        if len(self.selected_files) >= 10:
+            self.train_button.config(state=tk.NORMAL)
+        else:
+            self.train_button.config(state=tk.DISABLED)
+    
     def train_model(self):
         if not self.selected_files:
             self.label.config(text="Nenhum arquivo selecionado!")
@@ -168,73 +199,73 @@ class MusicGenApp:
         
         self.label.config(text="Construindo e treinando modelo...")
         input_shape = (X.shape[1], X.shape[2])
-        self.model = build_model(input_shape)
+        output_shape = y.shape[1]  # Corrige a dimensão da saída
+        self.model = build_model(input_shape, output_shape)
         self.model = train_model(self.model, X, y)
         
+        self.input_shape_dim = input_shape[1]  # Salva a dimensão do input shape para uso posterior
+        
         self.label.config(text="Modelo treinado com sucesso!")
-    
+
     def generate_music(self):
         if self.model is None:
             self.label.config(text="Modelo não treinado!")
             return
-        
+
         try:
             duration = int(self.duration_entry.get())
         except ValueError:
             self.label.config(text="Por favor, insira uma duração válida!")
+           
             return
         
-        frames_per_second = 22050 // 512
-        total_frames = duration * frames_per_second
-        
         self.label.config(text="Gerando música...")
-        initial_seq = np.random.rand(1, 30, 128)
+        num_samples = duration * self.sr
+        generated_audio = np.zeros((num_samples,))
         
-        generated_spectrograms = []
-        current_seq = initial_seq
-        for _ in range(total_frames):
-            next_frame = self.model.predict(current_seq)
-            generated_spectrograms.append(next_frame[0])
-            current_seq = np.concatenate((current_seq[:, 1:, :], next_frame[:, np.newaxis, :]), axis=1)
+        # Inicia com uma sequência aleatória do treinamento
+        start_idx = np.random.randint(0, len(self.selected_files))
+        initial_audio = load_and_preprocess_audio([self.selected_files[start_idx]])[0]
+        generated_sequence = initial_audio[:30]  # Usa o comprimento da sequência
         
-        generated_spectrogram = np.vstack(generated_spectrograms)
+        for i in range(0, num_samples, 512):
+            prediction = self.model.predict(generated_sequence[np.newaxis, :, :])
+            audio_sample = spectrogram_to_audio(prediction[0])
+            generated_audio[i:i + len(audio_sample)] = audio_sample[:num_samples - i]
+            
+            generated_sequence = np.roll(generated_sequence, -1, axis=0)
+            generated_sequence[-1, :] = prediction[0]
         
-        self.label.config(text="Convertendo espectrograma para áudio...")
-        generated_audio = spectrogram_to_audio(generated_spectrogram, sr=self.sr)
-        
-        save_audio(generated_audio, self.sr, "musica_gerada")
-        self.label.config(text="Música gerada e salva com sucesso!")
+        self.label.config(text="Música gerada com sucesso!")
+        save_audio(generated_audio, self.sr, "generated_music")
 
     def generate_midi(self):
         if self.model is None:
             self.label.config(text="Modelo não treinado!")
             return
         
-        try:
-            duration = int(self.duration_entry.get())
-        except ValueError:
-            self.label.config(text="Por favor, insira uma duração válida!")
-            return
+        self.label.config(text="Gerando MIDI...")
+        duration = int(self.duration_entry.get())
+        num_samples = duration * self.sr
+        generated_spectrogram = np.zeros((num_samples, self.input_shape_dim))
         
-        frames_per_second = 22050 // 512
-        total_frames = duration * frames_per_second
+        # Inicia com uma sequência aleatória do treinamento
+        start_idx = np.random.randint(0, len(self.selected_files))
+        initial_audio = load_and_preprocess_audio([self.selected_files[start_idx]])[0]
+        generated_sequence = initial_audio[:30]  # Usa o comprimento da sequência
         
-        self.label.config(text="Gerando música...")
-        initial_seq = np.random.rand(1, 30, 128)
+        for i in range(num_samples):
+            prediction = self.model.predict(generated_sequence[np.newaxis, :, :])
+            generated_spectrogram[i] = prediction[0]
+            
+            generated_sequence = np.roll(generated_sequence, -1, axis=0)
+            generated_sequence[-1, :] = prediction[0]
         
-        generated_spectrograms = []
-        current_seq = initial_seq
-        for _ in range(total_frames):
-            next_frame = self.model.predict(current_seq)
-            generated_spectrograms.append(next_frame[0])
-            current_seq = np.concatenate((current_seq[:, 1:, :], next_frame[:, np.newaxis, :]), axis=1)
-        
-        generated_spectrogram = np.vstack(generated_spectrograms)
-        
-        self.label.config(text="Convertendo espectrograma para MIDI...")
-        save_midi(generated_spectrogram, sr=self.sr, filename="musica_gerada")
-        self.label.config(text="MIDI gerado e salvo com sucesso!")
+        save_midi(generated_spectrogram, self.sr, "generated_music_midi")
+        self.label.config(text="MIDI gerado com sucesso!")
 
-root = tk.Tk()
-app = MusicGenApp(root)
-root.mainloop()
+# Criação da Interface Gráfica
+if __name__ == "__main__":
+    root = tk.Tk()
+    app = MusicGenApp(root)
+    root.mainloop()
